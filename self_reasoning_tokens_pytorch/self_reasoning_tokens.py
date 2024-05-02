@@ -140,6 +140,7 @@ class Transformer(Module):
         x,
         num_reason_tokens = 0,
         num_steps_future_can_use_reason = 2,     # how many positions into the future until a reason token can be attended to
+        remove_reason_tokens_at_end = False,
         return_loss = False
     ):
 
@@ -159,7 +160,9 @@ class Transformer(Module):
 
         # intersperse reasoning tokens if needed
 
-        if num_reason_tokens > 0:
+        has_reason_tokens = num_reason_tokens > 0
+
+        if has_reason_tokens:
             assert num_reason_tokens <= self.max_reason_seq_len
 
             x = rearrange(x, 'b n d -> b n 1 d')
@@ -200,11 +203,6 @@ class Transformer(Module):
             else:
                 attn_kwargs = dict(attn_mask = attn_mask)
 
-            # handle labels
-
-            if return_loss:
-                labels = repeat(labels, 'b n -> b (n r)', r = num_tokens_per_timestep)
-
         # attention and feedforward, passing in reason tokens mask from above
 
         x = x + pos
@@ -217,8 +215,17 @@ class Transformer(Module):
 
         logits = self.to_logits(embed)
 
+        # whether to remove reason tokens at the very end
+
+        if has_reason_tokens and remove_reason_tokens_at_end:
+            logits = rearrange(logits, 'b (n r) c -> b n r c', r = num_tokens_per_timestep)
+            logits = logits[..., 0, :]
+
         if not return_loss:
             return logits
+
+        if has_reason_tokens and not remove_reason_tokens_at_end:
+            labels = repeat(labels, 'b n -> b (n r)', r = num_tokens_per_timestep)
 
         loss = F.cross_entropy(
             rearrange(logits, 'b n c -> b c n'),
