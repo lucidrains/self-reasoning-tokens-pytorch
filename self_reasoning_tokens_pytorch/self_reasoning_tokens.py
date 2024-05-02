@@ -1,0 +1,209 @@
+import torch
+from torch import nn, Tensor
+import torch.nn.functional as F
+from torch.nn import Module, ModuleList
+
+from einops import einsum, rearrange, repeat, reduce
+from einops.layers.torch import Rearrange
+
+from x_transformers import (
+    RMSNorm,
+    FeedForward
+)
+
+# helper functions
+
+def exists(v):
+    return v is not None
+
+def default(v, d):
+    return v if exists(v) else d
+
+# attention
+
+class CausalAttention(Module):
+    def __init__(
+        self,
+        dim,
+        dim_head = 64,
+        heads = 8
+    ):
+        super().__init__()
+        self.scale = dim_head ** -0.5
+        dim_inner = dim_head * heads
+
+        self.to_qkv = nn.Sequential(
+            RMSNorm(dim),
+            nn.Linear(dim, dim_inner * 3, bias = False),
+            Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
+        )
+
+        self.to_out = nn.Sequential(
+            Rearrange('b h n d -> b n (h d)'),
+            nn.Linear(dim_inner, dim, bias = False)
+        )
+
+    def forward(
+        self,
+        x,
+        attn_mask = None
+    ):
+        seq, device = x.shape[-2], x.device
+
+        q, k, v = self.to_qkv(x)
+
+        q = q * self.scale
+        sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+
+        causal_mask = torch.ones((seq, seq), device = device).triu(1)
+
+        mask_value = -torch.finfo(sim.dtype).max
+        sim = sim.masked_fill(causal_mask, mask_value)
+
+        if exists(attn_mask):
+            sim = sim.masked_fill(~attn_mask, mask_value)
+
+        attn = sim.softmax(dim = -1)
+
+        out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+        return self.to_out(out)
+
+# transformer
+
+class Transformer(Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        num_tokens,
+        depth,
+        max_seq_len = 2048,
+        max_reason_seq_len = 4,
+        dim_head = 64,
+        heads = 8,
+        ignore_index = -1
+    ):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+
+        # embed
+
+        self.token_emb = nn.Embedding(num_tokens, dim)
+        self.pos_emb = nn.Embedding(max_seq_len, dim)
+
+        # reasoning tokens
+
+        self.max_reason_seq_len = max_reason_seq_len
+        self.reason_tokens = nn.Parameter(torch.randn(max_reason_seq_len, dim))
+        nn.init.normal_(self.reason_tokens, std = 0.02)
+
+        # transformer layers
+
+        self.layers = ModuleList([])
+        for _ in range(depth):
+
+            attn = CausalAttention(
+                dim = dim,
+                dim_head = dim_head,
+                heads = heads
+            )
+
+            ff = nn.Sequential(
+                RMSNorm(dim),
+                FeedForward(dim = dim)
+            )
+
+            self.layers.append(ModuleList([attn, ff]))
+
+        self.norm = RMSNorm(dim)
+        self.to_logits = nn.Linear(dim, num_tokens, bias = False)
+
+        # loss related
+
+        self.ignore_index = ignore_index
+
+    def forward(
+        self,
+        x,
+        num_reason_tokens = 0,
+        num_steps_future_can_use_reason = 2,     # how many positions into the future until a reason token can be attended to
+        return_loss = False
+    ):
+
+        if return_loss:
+            x, labels = x[:, :-1], x[:, 1:]
+
+        batch, seq, device = *x.shape, x.device
+
+        assert seq <= self.max_seq_len
+
+        x = self.token_emb(x)
+
+        seq_arange = torch.arange(seq, device = device)
+        pos = self.pos_emb(seq_arange)
+
+        attn_mask = None
+
+        # intersperse reasoning tokens if needed
+
+        if num_reason_tokens > 0:
+            assert num_reason_tokens <= self.max_reason_seq_len
+
+            x = rearrange(x, 'b n d -> b n 1 d')
+
+            reason_tokens = self.reason_tokens[:num_reason_tokens]
+            reason_tokens = repeat(reason_tokens, 'r d -> b n r d', b = batch, n = seq)
+
+            x = torch.cat((x, reason_tokens), dim = -2)
+            x = rearrange(x, 'b n r d -> b (n r) d')
+
+            # handle absolute positions
+            # applied axially to reasoning tokens and main token
+
+            num_tokens_per_timestep = num_reason_tokens + 1
+            pos = repeat(pos, 'n d -> (n r) d', r = num_tokens_per_timestep)
+
+            # handle masking for reasoning tokens
+            # each reason token can only be attended to by tokens (+ future reasoning tokens) that are {num_steps_future_can_use_reason}
+
+            seq_timesteps = repeat(seq_arange, 'n -> (n r)', r = num_tokens_per_timestep)
+
+            seq_with_reason_range = torch.arange(seq_timesteps.shape[-1], device = device)
+            is_reason_token_mask = ~(seq_with_reason_range % num_tokens_per_timestep == 0)
+
+            q_range = repeat(seq_with_reason_range, 'n -> n 1')
+            k_range = repeat(seq_with_reason_range, 'n -> 1 n')
+
+            attn_mask = ~(
+                is_reason_token_mask &
+                (q_range > k_range) &
+                ((q_range - num_steps_future_can_use_reason) <= k_range)
+            )
+
+            # handle labels
+
+            if return_loss:
+                labels = repeat(labels, 'b n -> b (n r)', r = num_tokens_per_timestep)
+
+        # attention and feedforward, passing in reason tokens mask from above
+
+        x = x + pos
+
+        for attn, ff in self.layers:
+            x = attn(x, attn_mask = attn_mask) + x
+            x = ff(x) + x
+
+        embed = self.norm(x)
+
+        logits = self.to_logits(embed)
+
+        if not return_loss:
+            return logits
+
+        loss = F.cross_entropy(
+            rearrange(logits, 'b n c -> b c n'),
+            labels,
+            ignore_index = self.ignore_index
+        )
+
+        return loss
