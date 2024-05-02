@@ -46,7 +46,8 @@ class CausalAttention(Module):
     def forward(
         self,
         x,
-        attn_mask = None
+        attn_mask = None,
+        stop_grad_attn_mask = None
     ):
         seq, device = x.shape[-2], x.device
 
@@ -59,6 +60,13 @@ class CausalAttention(Module):
 
         mask_value = -torch.finfo(sim.dtype).max
         sim = sim.masked_fill(causal_mask, mask_value)
+
+        if exists(stop_grad_attn_mask):
+            # this approach isn't quite right, as the values are not stop gradient
+            # but will run some experiments just to see
+
+            detached_sim = sim.detach()
+            sim = torch.where(stop_grad_attn_mask, detached_sim, sim)
 
         if exists(attn_mask):
             sim = sim.masked_fill(~attn_mask, mask_value)
@@ -81,7 +89,8 @@ class Transformer(Module):
         max_reason_seq_len = 4,
         dim_head = 64,
         heads = 8,
-        ignore_index = -1
+        ignore_index = -1,
+        stop_grad_next_tokens_to_reason = False
     ):
         super().__init__()
         self.max_seq_len = max_seq_len
@@ -122,6 +131,10 @@ class Transformer(Module):
 
         self.ignore_index = ignore_index
 
+        # stop gradient settings
+
+        self.stop_grad_next_tokens_to_reason = stop_grad_next_tokens_to_reason
+
     def forward(
         self,
         x,
@@ -142,7 +155,7 @@ class Transformer(Module):
         seq_arange = torch.arange(seq, device = device)
         pos = self.pos_emb(seq_arange)
 
-        attn_mask = None
+        attn_kwargs = dict()
 
         # intersperse reasoning tokens if needed
 
@@ -180,6 +193,13 @@ class Transformer(Module):
                 ((q_range - num_steps_future_can_use_reason) <= k_range)
             )
 
+            # whether to fully mask out or stop gradient on attention matrix
+
+            if self.stop_grad_next_tokens_to_reason:
+                attn_kwargs = dict(stop_grad_attn_mask = ~attn_mask)
+            else:
+                attn_kwargs = dict(attn_mask = attn_mask)
+
             # handle labels
 
             if return_loss:
@@ -190,7 +210,7 @@ class Transformer(Module):
         x = x + pos
 
         for attn, ff in self.layers:
-            x = attn(x, attn_mask = attn_mask) + x
+            x = attn(x, **attn_kwargs) + x
             x = ff(x) + x
 
         embed = self.norm(x)
