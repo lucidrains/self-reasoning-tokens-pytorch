@@ -55,7 +55,7 @@ class CausalAttention(Module):
         q = q * self.scale
         sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
 
-        causal_mask = torch.ones((seq, seq), device = device).triu(1)
+        causal_mask = torch.ones((seq, seq), device = device, dtype = torch.bool).triu(1)
 
         mask_value = -torch.finfo(sim.dtype).max
         sim = sim.masked_fill(causal_mask, mask_value)
@@ -171,8 +171,8 @@ class Transformer(Module):
             seq_with_reason_range = torch.arange(seq_timesteps.shape[-1], device = device)
             is_reason_token_mask = ~(seq_with_reason_range % num_tokens_per_timestep == 0)
 
-            q_range = repeat(seq_with_reason_range, 'n -> n 1')
-            k_range = repeat(seq_with_reason_range, 'n -> 1 n')
+            q_range = rearrange(seq_timesteps, 'n -> n 1')
+            k_range = rearrange(seq_timesteps, 'n -> 1 n')
 
             attn_mask = ~(
                 is_reason_token_mask &
