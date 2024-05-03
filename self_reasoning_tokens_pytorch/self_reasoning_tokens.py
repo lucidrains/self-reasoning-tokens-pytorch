@@ -1,5 +1,5 @@
 import torch
-from torch import nn, Tensor
+from torch import nn
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
@@ -58,11 +58,19 @@ class CausalAttention(Module):
         q, k, v = self.to_qkv(x)
 
         if exists(stop_grad_attn_mask):
+            if not isinstance(stop_grad_attn_mask, tuple):
+                stop_grad_attn_mask = (None, stop_grad_attn_mask, stop_grad_attn_mask)
+
+            assert len(stop_grad_attn_mask) == 3, 'stop_grad_attn_mask must be either a stop grad mask (implicit for key / values) or a tuple of 3 Tensor for individual stop grads of queries, keys, values'
+
+            q_stop_grad, k_stop_grad, v_stop_grad = stop_grad_attn_mask
+
             out = stop_graddable_attn(
                 q, k, v,
                 attn_mask = attn_mask,
-                k_stop_grad_mask = stop_grad_attn_mask,
-                v_stop_grad_mask = stop_grad_attn_mask
+                q_stop_grad_mask = q_stop_grad,
+                k_stop_grad_mask = k_stop_grad,
+                v_stop_grad_mask = v_stop_grad
             )
 
         else:

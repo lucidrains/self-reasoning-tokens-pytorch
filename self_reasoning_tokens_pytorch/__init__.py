@@ -1,5 +1,6 @@
 from self_reasoning_tokens_pytorch.self_reasoning_tokens import (
-    Transformer
+    Transformer,
+    CausalAttention
 )
 
 from self_reasoning_tokens_pytorch.attention_with_stop_graddable_qkv import (
