@@ -11,6 +11,10 @@ from x_transformers import (
     FeedForward
 )
 
+from self_reasoning_tokens_pytorch.attention_with_stop_graddable_qkv import (
+    stop_graddable_attn
+)
+
 # helper functions
 
 def exists(v):
@@ -53,27 +57,32 @@ class CausalAttention(Module):
 
         q, k, v = self.to_qkv(x)
 
-        q = q * self.scale
-        sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
-
-        causal_mask = torch.ones((seq, seq), device = device, dtype = torch.bool).triu(1)
-
-        mask_value = -torch.finfo(sim.dtype).max
-        sim = sim.masked_fill(causal_mask, mask_value)
-
         if exists(stop_grad_attn_mask):
-            # this approach isn't quite right, as the values are not stop gradient
-            # but will run some experiments just to see
+            out = stop_graddable_attn(
+                q, k, v,
+                attn_mask = attn_mask,
+                k_stop_grad_mask = stop_grad_attn_mask,
+                v_stop_grad_mask = stop_grad_attn_mask
+            )
 
-            detached_sim = sim.detach()
-            sim = torch.where(stop_grad_attn_mask, detached_sim, sim)
+        else:
+            q = q * self.scale
+            sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
 
-        if exists(attn_mask):
-            sim = sim.masked_fill(~attn_mask, mask_value)
+            causal_mask = torch.ones((seq, seq), device = device, dtype = torch.bool).triu(1)
 
-        attn = sim.softmax(dim = -1)
+            mask_value = -torch.finfo(sim.dtype).max
+            sim = sim.masked_fill(causal_mask, mask_value)
 
-        out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+            if exists(attn_mask):
+                sim = sim.masked_fill(~attn_mask, mask_value)
+
+            attn = sim.softmax(dim = -1)
+
+            out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+
+        # combine heads
+
         return self.to_out(out)
 
 # transformer
