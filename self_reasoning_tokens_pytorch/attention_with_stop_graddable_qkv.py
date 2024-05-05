@@ -78,6 +78,19 @@ class StopGraddableAttentionFunction(Function):
 
         q, k, v, p, o = ctx.saved_tensors
 
+        # stop grad masks are either type bool, with True indicating stop grad, or can be type float, in which case it will scale the gradients
+
+        if q_stop_grad_mask.dtype == torch.bool:
+            q_stop_grad_mask = (~q_stop_grad_mask).float()
+
+        if k_stop_grad_mask.dtype == torch.bool:
+            k_stop_grad_mask = (~k_stop_grad_mask).float()
+
+        print(v_stop_grad_mask.dtype)
+        if v_stop_grad_mask.dtype == torch.bool:
+            print('hmmm')
+            v_stop_grad_mask = (~v_stop_grad_mask).float()
+
         # softmax D
 
         D = (do * o).sum(dim = -1, keepdims = True)        
@@ -87,7 +100,7 @@ class StopGraddableAttentionFunction(Function):
         p_v = p
 
         if exists(v_stop_grad_mask):
-            p_v = p_v.masked_fill(v_stop_grad_mask, 0.)
+            p_v.mul_(v_stop_grad_mask)
 
         # dv
 
@@ -103,10 +116,10 @@ class StopGraddableAttentionFunction(Function):
         ds_q = ds_k = ds
 
         if exists(q_stop_grad_mask):
-            ds_q = ds_q.masked_fill(q_stop_grad_mask, 0.)
+            ds_q.mul_(q_stop_grad_mask)
 
         if exists(k_stop_grad_mask):            
-            ds_k = ds_k.masked_fill(k_stop_grad_mask, 0.)
+            ds_k.mul_(k_stop_grad_mask)
 
         # dq and dk
 
