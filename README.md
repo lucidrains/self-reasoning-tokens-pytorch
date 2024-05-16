@@ -74,7 +74,7 @@ The mask should look something like
 ## Citations
 
 ```bibtex
-@misc{Bonetto2023,
+@misc{Bonetto2024,
     author  = {Felipe Bonetto},
     url     = {https://reasoning-tokens.ghost.io/reasoning-tokens/}
 }
